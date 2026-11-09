@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadEnvFile } from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createBot } from './bot.mjs';
@@ -12,6 +13,10 @@ function readConfig() {
   const admin = value('ADMIN_ID');
   const channel = value('CHANNEL_ID');
   const channelUrl = value('CHANNEL_URL');
+  const volumePath = value('RAILWAY_VOLUME_MOUNT_PATH');
+  if (value('RAILWAY_ENVIRONMENT_ID') && !volumePath) {
+    throw new Error('Подключите постоянный диск Railway к сервису. Путь монтирования: /data.');
+  }
   if (!token || !/^\d+:[a-zA-Z0-9_-]+$/.test(token)) throw new Error('Укажите токен BotFather в BOT_TOKEN.');
   if (admin && (!/^\d+$/.test(admin) || !Number.isSafeInteger(Number(admin)) || Number(admin) <= 0)) {
     throw new Error('ADMIN_ID должен быть числовым Telegram ID. Его покажет команда /id.');
@@ -27,7 +32,7 @@ function readConfig() {
     adminId: admin && Number(admin),
     channelId: channel?.startsWith('@') ? channel : channel && Number(channel),
     channelUrl,
-    dbPath: value('DB_PATH') ?? 'data/submissions.sqlite',
+    dbPath: volumePath ? join(volumePath, 'submissions.sqlite') : value('DB_PATH') ?? 'data/submissions.sqlite',
   };
 }
 
