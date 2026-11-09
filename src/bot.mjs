@@ -1,43 +1,42 @@
 import { adminButton, adminPanel, isReviewable } from './admin.mjs';
 import { preview, publication, readContent } from './content.mjs';
+import { channelButton, channelName, publicKeyboard, publicScreen } from './public-menu.mjs';
 import { TelegramError } from './telegram.mjs';
 
-const channelName = 'ПОДСЛУШКА ВМЕДА';
-const instructions = `Хотите предложить пост в «${channelName}»?
-
-Подпишитесь на канал, чтобы отправить заявку. Просто пришлите сюда текст, фото, видео, GIF, файл или стикер. Можно добавить подпись или отправить альбом.
-
-Публикации в канале полностью анонимны. Бот не раскрывает вашу личность подписчикам. Чтобы сохранить анонимность, не указывайте личные данные в тексте и вложениях.
-
-После одобрения бот опубликует присланный материал со ссылками на канал и бота.`;
 const setupNotice = 'Бот ещё настраивается. Приём сообщений откроется после настройки.';
 
 const statusText = {
-  pending: 'Ожидает решения',
+  pending: '🕒 Ожидает решения. Выберите действие ниже.',
   approved: '⏳ Публикуется',
   published: '✅ Опубликовано',
   rejected: '❌ Отклонено',
-  failed: 'Telegram отклонил отправку. Проверьте /check и повторите.',
-  uncertain: 'Telegram мог принять отправку. Проверьте этот шаг в канале перед выбором.',
+  failed: '⚠️ Telegram отклонил отправку. Проверьте /check и повторите.',
+  uncertain: '🔎 Telegram мог принять отправку. Проверьте этот шаг в канале перед выбором.',
 };
 
 function card(row) {
   const buttons = {
-    pending: [['✅ Опубликовать', 'approve'], ['❌ Отклонить', 'reject']],
-    failed: [['Повторить отправку', 'retry']],
-    uncertain: [['Этот шаг есть в канале', 'confirm'], ['Шага в канале нет. Повторить', 'retry']],
+    pending: [['✅ Опубликовать', 'approve', 'success'], ['❌ Отклонить', 'reject', 'danger']],
+    failed: [['🔄 Повторить отправку', 'retry', 'primary']],
+    uncertain: [['✅ Шаг есть в канале', 'confirm', 'success'], ['🔄 Шага нет · повторить', 'retry', 'primary']],
   }[row.status] ?? [];
-  const keyboard = buttons.map(([text, action]) => ({
+  const keyboard = buttons.map(([text, action, style]) => ({
     text,
     callback_data: `${action}:${row.id}:${row.version}`,
+    style,
   }));
   let status = statusText[row.status];
   if (row.status === 'uncertain') {
     status += row.step === 0 ? ' Шаг: материал заявки.' : ' Шаг: сообщение со ссылками под альбомом.';
   }
+  const author = row.username
+    ? `@${row.username.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}`
+    : 'без @username';
+  const actions = row.status === 'uncertain' ? keyboard.map(button => [button]) : keyboard.length ? [keyboard] : [];
   return {
-    text: `Заявка №${row.id}\nАвтор: ${row.username ? `@${row.username}` : 'без @username'}\nTelegram ID: ${row.chat_id}\n\n${status}`,
-    reply_markup: { inline_keyboard: [...(keyboard.length ? [keyboard] : []), [adminButton]] },
+    text: `📨 <b>Заявка №${row.id}</b>\n👤 Автор: ${author}\n🆔 Telegram ID: <code>${row.chat_id}</code>\n\n${status}`,
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: [...actions, [adminButton]] },
   };
 }
 
@@ -74,25 +73,15 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     }
   }
 
-  function subscriberMenu(userId, subscribed) {
-    const keyboard = [[{ text: 'Открыть канал', url: target.links[0].url }]];
-    if (subscribed !== true) keyboard.push([{ text: 'Я подписался', callback_data: 'subscribe:check' }]);
-    if (userId === adminId) keyboard.push([adminButton]);
-    return { inline_keyboard: keyboard };
+  function publicOptions(userId, subscribed) {
+    return { url: target.links[0].url, subscribed, isAdmin: userId === adminId };
   }
 
-  function subscriptionPrompt(subscribed, retry = false) {
+  function subscriptionPrompt(subscribed) {
     const prompt = subscribed === false
-      ? 'Подпишитесь на канал и нажмите «Я подписался».'
-      : 'Telegram пока не подтвердил подписку. Нажмите «Я подписался», чтобы проверить её ещё раз.';
-    return retry ? `${prompt} Затем отправьте заявку ещё раз.` : prompt;
-  }
-
-  function welcome(userId, subscribed) {
-    return {
-      text: subscribed === true ? instructions : `${instructions}\n\n${subscriptionPrompt(subscribed)}`,
-      reply_markup: subscriberMenu(userId, subscribed),
-    };
+      ? '🔔 <b>Подпишитесь на канал</b>\nОткройте канал, подпишитесь и нажмите «Проверить подписку».'
+      : '⚠️ <b>Статус подписки пока недоступен</b>\nНажмите «Проверить подписку», чтобы повторить проверку.';
+    return `${prompt}\n\n📨 После подтверждения отправьте материал ещё раз.`;
   }
 
   async function checkTarget() {
@@ -108,8 +97,8 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     target = {
       chatId: chat.id,
       links: [
-        { text: channelName, url },
-        { text: 'Предложить пост', url: `https://t.me/${identity.username}` },
+        { text: `📣 ${channelName}`, url, style: 'primary' },
+        { text: '✍️ Предложить пост', url: `https://t.me/${identity.username}`, style: 'success' },
       ],
     };
   }
@@ -133,7 +122,8 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     if (command === '/admin') return id === adminId ? showAdmin() : say(id, 'Панель доступна администратору.');
     if (command === '/start' || command === '/help') {
       if (!target) return say(id, setupNotice);
-      return attempt('sendMessage', { chat_id: id, ...welcome(id, await membership(id)) });
+      const screen = command === '/help' ? 'help' : 'home';
+      return attempt('sendMessage', { chat_id: id, ...publicScreen(screen, publicOptions(id, await membership(id))) });
     }
     if (!target) return say(id, setupNotice);
 
@@ -147,15 +137,21 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       if (!sameAlbum) {
         await attempt('sendMessage', {
           chat_id: id,
-          text: subscriptionPrompt(subscribed, true),
-          reply_markup: subscriberMenu(id, subscribed),
+          text: subscriptionPrompt(subscribed),
+          parse_mode: 'HTML',
+          reply_markup: publicKeyboard(publicOptions(id, subscribed)),
         });
       }
       return;
     }
     const accepted = store.accept(message, content, now());
     if (accepted?.first) {
-      await attempt('sendMessage', { chat_id: id, text: `Заявка №${accepted.id} принята. Администратор её проверит.` });
+      await attempt('sendMessage', {
+        chat_id: id,
+        text: `✅ <b>Заявка №${accepted.id} принята</b>\n\n🕒 Она отправлена на модерацию. Пост появится в канале после одобрения.`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[channelButton(target.links[0].url)]] },
+      });
     }
   }
 
@@ -166,18 +162,20 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
 
   async function onCallback(query) {
     const respond = text => attempt('answerCallbackQuery', { callback_query_id: query.id, text });
-    if (query.data === 'subscribe:check') {
+    if (['subscribe:check', 'public:home', 'public:help'].includes(query.data)) {
       if (query.message?.chat?.id !== query.from.id) return respond('Откройте личный чат с ботом.');
       if (!target) return respond(setupNotice);
+      const checking = query.data === 'subscribe:check';
+      if (!checking) await respond();
       const subscribed = await membership(query.from.id);
-      if (subscribed !== true) {
+      if (checking && subscribed !== true) {
         return respond(subscribed === false ? 'Подписка пока не найдена. Подпишитесь и повторите.' : 'Не удалось проверить подписку. Попробуйте ещё раз.');
       }
-      await respond('Подписка подтверждена. Можно отправлять заявку.');
+      if (checking) await respond('Подписка подтверждена. Можно отправлять заявку.');
       await attempt('editMessageText', {
         chat_id: query.from.id,
         message_id: query.message.message_id,
-        ...welcome(query.from.id, true),
+        ...publicScreen(query.data === 'public:help' ? 'help' : 'home', publicOptions(query.from.id, subscribed)),
       });
       return;
     }
@@ -186,15 +184,15 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       await respond();
       return showAdmin();
     }
-    const panelAction = /^panel:(page|open):(\d{1,15})$/.exec(query.data ?? '');
+    const panelAction = /^panel:(page|open):(\d{1,15})(?::(all|pending|attention))?$/.exec(query.data ?? '');
     if (panelAction) {
-      const [, action, value] = panelAction;
+      const [, action, value, filter] = panelAction;
       if (action === 'page') {
         await respond('Панель обновлена.');
         return attempt('editMessageText', {
           chat_id: adminId,
           message_id: query.message.message_id,
-          ...adminPanel(store, Number(value)),
+          ...adminPanel(store, Number(value), filter),
         });
       }
       const row = store.get(Number(value));

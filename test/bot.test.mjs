@@ -80,7 +80,7 @@ test('private intake, exact admin authorization and one anonymous publication', 
   const f = fixture(t);
   await f.restart();
   await f.bot.update(privateMessage(1, { text: '/start' }));
-  assert.match(f.calls.at(-1).params.text, /Просто пришлите/);
+  assert.match(f.calls.at(-1).params.text, /Подписка подтверждена/);
   const text = '😀 Привет!';
   const bold = { type: 'bold', offset: 3, length: 7 };
   const update = privateMessage(2, {
@@ -96,6 +96,7 @@ test('private intake, exact admin authorization and one anonymous publication', 
   assert.equal(adminCalls[0].params.text, text);
   assert.match(adminCalls[1].params.text, /@sender_example/);
   assert.match(adminCalls[1].params.text, new RegExp(String(userId)));
+  assert.deepEqual(adminCalls[1].params.reply_markup.inline_keyboard[0].map(button => button.style), ['success', 'danger']);
   assert.equal(adminCalls[1].params.reply_parameters.message_id, row.preview_id);
   assert.deepEqual(f.channelPosts(), []);
 
@@ -110,7 +111,7 @@ test('private intake, exact admin authorization and one anonymous publication', 
   assert.equal(f.store.get(1).status, 'published');
   assert.equal(f.channelPosts().length, 1);
   const { params } = f.channelPosts()[0];
-  assert.equal(params.text, `${text}\n\nПОДСЛУШКА ВМЕДА · Предложить пост`);
+  assert.equal(params.text, `${text}\n\n📣 ПОДСЛУШКА ВМЕДА · ✍️ Предложить пост`);
   assert.deepEqual(params.entities[0], bold);
   assert.equal(params.entities[1].offset, text.length + 2);
   assert.equal(params.entities[1].url, 'https://t.me/podslushka_example');
@@ -126,6 +127,8 @@ test('only subscribers can submit and users can verify a new subscription', asyn
   const prompt = f.calls.at(-1).params;
   assert.match(prompt.text, /Подпишитесь на канал/);
   assert.equal(prompt.reply_markup.inline_keyboard[0][0].url, 'https://t.me/podslushka_example');
+  assert.equal(prompt.reply_markup.inline_keyboard[0][0].style, 'primary');
+  assert.equal(prompt.reply_markup.inline_keyboard[1][0].style, 'success');
   assert.equal(f.store.get(1), undefined);
 
   f.setMembership({ status: 'member' });
@@ -136,6 +139,13 @@ test('only subscribers can submit and users can verify a new subscription', asyn
   assert.equal(f.calls.at(-1).method, 'editMessageText');
   assert.match(f.calls.at(-1).params.text, /Публикации в канале полностью анонимны/);
   assert.doesNotMatch(f.calls.at(-1).params.text, /администратор|username|Telegram ID/i);
+  const buttons = f.calls.at(-1).params.reply_markup.inline_keyboard.flat();
+  const openGuide = { id: 'guide', from: { id: userId }, message: { message_id: 5, chat: { id: userId } } };
+  await f.bot.update({ callback_query: { ...openGuide, data: buttons.find(button => button.callback_data === 'public:help').callback_data } });
+  assert.match(f.calls.at(-1).params.text, /Что можно отправить/);
+  const goHome = f.calls.at(-1).params.reply_markup.inline_keyboard.flat().find(button => button.callback_data === 'public:home');
+  await f.bot.update({ callback_query: { ...openGuide, data: goHome.callback_data } });
+  assert.match(f.calls.at(-1).params.text, /Как предложить пост/);
   await f.bot.update(privateMessage(2, { text: 'Вторая заявка' }));
   assert.equal(f.store.get(1).status, 'collecting');
 
@@ -145,7 +155,7 @@ test('only subscribers can submit and users can verify a new subscription', asyn
   f.setMembership(new TelegramError('getChatMember', 503));
   await f.bot.update(privateMessage(4, { text: 'При недоступности Telegram' }));
   assert.equal(f.store.get(2), undefined);
-  assert.match(f.calls.at(-1).params.text, /пока не подтвердил подписку/);
+  assert.match(f.calls.at(-1).params.text, /Статус подписки пока недоступен/);
 });
 
 test('only the admin can open the queue and recover an actionable moderation card', async t => {
@@ -169,7 +179,13 @@ test('only the admin can open the queue and recover an actionable moderation car
   const panel = f.calls.at(-1).params;
   assert.match(panel.text, /На рассмотрении · 1/);
   open.callback_query.from.id = adminId;
-  open.callback_query.data = panel.reply_markup.inline_keyboard[0][0].callback_data;
+  open.callback_query.data = 'panel:page:0:attention';
+  await f.bot.update(open);
+  assert.match(f.calls.at(-1).params.text, /В этой категории пока нет заявок/);
+  open.callback_query.data = 'panel:page:0:pending';
+  await f.bot.update(open);
+  open.callback_query.data = f.calls.at(-1).params.reply_markup.inline_keyboard.flat()
+    .find(button => button.callback_data === 'panel:open:1').callback_data;
   await f.bot.update(open);
   const reopened = f.store.get(1);
   assert.notEqual(reopened.card_id, previous.card_id);
@@ -243,7 +259,10 @@ test('an ambiguous send needs confirmation before the bot can finish', async t =
 });
 
 test('supported media is sent by file ID and full captions are preserved', () => {
-  const links = [{ text: 'Канал', url: 'https://t.me/channel' }, { text: 'Бот', url: 'https://t.me/bot' }];
+  const links = [
+    { text: '📣 Канал', url: 'https://t.me/channel', style: 'primary' },
+    { text: '✍️ Бот', url: 'https://t.me/bot', style: 'success' },
+  ];
   const cases = [
     [{ animation: { file_id: 'gif' }, document: { file_id: 'ignored' } }, 'sendAnimation', 'animation', 'gif'],
     [{ photo: [{ file_id: 'small' }, { file_id: 'large' }] }, 'sendPhoto', 'photo', 'large'],

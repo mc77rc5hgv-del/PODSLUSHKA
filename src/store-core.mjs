@@ -65,11 +65,11 @@ export function createStore(db, transaction) {
     statusCounts: () => Object.fromEntries(db.prepare(
       'SELECT status, COUNT(*) AS total FROM submissions GROUP BY status',
     ).all().map(({ status, total }) => [status, total])),
-    reviewQueue: (limit, offset) => db.prepare(`
+    reviewQueue: (limit, offset, statuses) => db.prepare(`
       SELECT id, status FROM submissions
-      WHERE status IN ('pending', 'failed', 'uncertain')
+      WHERE status IN (${statuses.map(() => '?').join(', ')})
       ORDER BY id DESC LIMIT ? OFFSET ?
-    `).all(limit, offset),
+    `).all(...statuses, limit, offset),
     parts: id => db.prepare('SELECT content FROM parts WHERE submission_id = ? ORDER BY message_id')
       .all(id).map(({ content }) => JSON.parse(content)),
     next: () => db.prepare(`
