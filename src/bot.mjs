@@ -1,12 +1,15 @@
+import { adminButton, adminPanel, isReviewable } from './admin.mjs';
 import { preview, publication, readContent } from './content.mjs';
 import { TelegramError } from './telegram.mjs';
 
-const channelName = 'Подслушка в мида';
+const channelName = 'ПОДСЛУШКА ВМЕДА';
 const instructions = `Хотите предложить пост в «${channelName}»?
 
-Просто пришлите сюда текст, фото, видео, GIF, файл или стикер. К медиа можно добавить подпись в Telegram. Альбом можно отправить одним сообщением.
+Подпишитесь на канал, чтобы отправить заявку. Просто пришлите сюда текст, фото, видео, GIF, файл или стикер. Можно добавить подпись или отправить альбом.
 
-Администратор увидит ваш Telegram ID и @username, если он у вас есть. После одобрения бот опубликует только присланный материал со ссылками на канал и бота.`;
+Публикации в канале полностью анонимны. Бот не раскрывает вашу личность подписчикам. Чтобы сохранить анонимность, не указывайте личные данные в тексте и вложениях.
+
+После одобрения бот опубликует присланный материал со ссылками на канал и бота.`;
 const setupNotice = 'Бот ещё настраивается. Приём сообщений откроется после настройки.';
 
 const statusText = {
@@ -34,7 +37,7 @@ function card(row) {
   }
   return {
     text: `Заявка №${row.id}\nАвтор: ${row.username ? `@${row.username}` : 'без @username'}\nTelegram ID: ${row.chat_id}\n\n${status}`,
-    reply_markup: { inline_keyboard: keyboard.length ? [keyboard] : [] },
+    reply_markup: { inline_keyboard: [...(keyboard.length ? [keyboard] : []), [adminButton]] },
   };
 }
 
@@ -44,6 +47,7 @@ function retryAt(error, now) {
 
 export function createBot({ api, store, config, identity, now = Date.now, log = console.warn }) {
   let target;
+  let lastAlbum;
   const { adminId, channelId, channelUrl } = config;
   async function attempt(method, params) {
     try {
@@ -54,6 +58,42 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
   }
 
   const say = (chatId, text) => attempt('sendMessage', { chat_id: chatId, text });
+  const showAdmin = () => attempt('sendMessage', {
+    chat_id: adminId,
+    protect_content: true,
+    ...adminPanel(store, 0),
+  });
+
+  async function membership(userId) {
+    try {
+      const { status, is_member } = await api('getChatMember', { chat_id: target.chatId, user_id: userId });
+      return ['creator', 'administrator', 'member'].includes(status) || (status === 'restricted' && is_member === true);
+    } catch (error) {
+      log(error.message);
+      return undefined;
+    }
+  }
+
+  function subscriberMenu(userId, subscribed) {
+    const keyboard = [[{ text: 'Открыть канал', url: target.links[0].url }]];
+    if (subscribed !== true) keyboard.push([{ text: 'Я подписался', callback_data: 'subscribe:check' }]);
+    if (userId === adminId) keyboard.push([adminButton]);
+    return { inline_keyboard: keyboard };
+  }
+
+  function subscriptionPrompt(subscribed, retry = false) {
+    const prompt = subscribed === false
+      ? 'Подпишитесь на канал и нажмите «Я подписался».'
+      : 'Telegram пока не подтвердил подписку. Нажмите «Я подписался», чтобы проверить её ещё раз.';
+    return retry ? `${prompt} Затем отправьте заявку ещё раз.` : prompt;
+  }
+
+  function welcome(userId, subscribed) {
+    return {
+      text: subscribed === true ? instructions : `${instructions}\n\n${subscriptionPrompt(subscribed)}`,
+      reply_markup: subscriberMenu(userId, subscribed),
+    };
+  }
 
   async function checkTarget() {
     if (!adminId || !channelId) throw new Error('Заполните ADMIN_ID и CHANNEL_ID.');
@@ -90,11 +130,29 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     const command = message.text?.split(/\s+/, 1)[0];
     if (command === '/id') return say(id, `Ваш Telegram ID: ${id}`);
     if (command === '/check' && id === adminId) return say(id, await check());
-    if (command === '/start' || command === '/help') return say(id, target ? instructions : setupNotice);
+    if (command === '/admin') return id === adminId ? showAdmin() : say(id, 'Панель доступна администратору.');
+    if (command === '/start' || command === '/help') {
+      if (!target) return say(id, setupNotice);
+      return attempt('sendMessage', { chat_id: id, ...welcome(id, await membership(id)) });
+    }
     if (!target) return say(id, setupNotice);
 
     const content = readContent(message);
     if (!content) return say(id, 'Пришлите текст, фото, видео, GIF, файл или стикер.');
+    const album = message.media_group_id;
+    const sameAlbum = album && lastAlbum?.id === album && lastAlbum.sender === id && lastAlbum.until > now();
+    const subscribed = sameAlbum ? lastAlbum.subscribed : await membership(id);
+    if (album && !sameAlbum) lastAlbum = { id: album, sender: id, subscribed, until: now() + 10_000 };
+    if (subscribed !== true) {
+      if (!sameAlbum) {
+        await attempt('sendMessage', {
+          chat_id: id,
+          text: subscriptionPrompt(subscribed, true),
+          reply_markup: subscriberMenu(id, subscribed),
+        });
+      }
+      return;
+    }
     const accepted = store.accept(message, content, now());
     if (accepted?.first) {
       await attempt('sendMessage', { chat_id: id, text: `Заявка №${accepted.id} принята. Администратор её проверит.` });
@@ -108,7 +166,56 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
 
   async function onCallback(query) {
     const respond = text => attempt('answerCallbackQuery', { callback_query_id: query.id, text });
+    if (query.data === 'subscribe:check') {
+      if (query.message?.chat?.id !== query.from.id) return respond('Откройте личный чат с ботом.');
+      if (!target) return respond(setupNotice);
+      const subscribed = await membership(query.from.id);
+      if (subscribed !== true) {
+        return respond(subscribed === false ? 'Подписка пока не найдена. Подпишитесь и повторите.' : 'Не удалось проверить подписку. Попробуйте ещё раз.');
+      }
+      await respond('Подписка подтверждена. Можно отправлять заявку.');
+      await attempt('editMessageText', {
+        chat_id: query.from.id,
+        message_id: query.message.message_id,
+        ...welcome(query.from.id, true),
+      });
+      return;
+    }
     if (query.from.id !== adminId || query.message?.chat?.id !== adminId) return respond('Доступ закрыт.');
+    if (query.data === 'panel:home') {
+      await respond();
+      return showAdmin();
+    }
+    const panelAction = /^panel:(page|open):(\d{1,15})$/.exec(query.data ?? '');
+    if (panelAction) {
+      const [, action, value] = panelAction;
+      if (action === 'page') {
+        await respond('Панель обновлена.');
+        return attempt('editMessageText', {
+          chat_id: adminId,
+          message_id: query.message.message_id,
+          ...adminPanel(store, Number(value)),
+        });
+      }
+      const row = store.get(Number(value));
+      if (!row || !isReviewable(row.status)) return respond('Заявка уже обработана. Обновите панель.');
+      await respond(`Открываю заявку №${row.id}.`);
+      try {
+        const previewId = await deliverPreview(row.id);
+        const message = await sendCard(row, previewId);
+        store.replaceCard(row.id, message.message_id, previewId);
+        await attempt('editMessageReplyMarkup', {
+          chat_id: adminId,
+          message_id: row.card_id,
+          reply_markup: { inline_keyboard: [[adminButton]] },
+        });
+      } catch (error) {
+        if (!(error instanceof TelegramError)) throw error;
+        log(error.message);
+        await say(adminId, 'Не удалось открыть заявку. Попробуйте ещё раз.');
+      }
+      return;
+    }
     const match = /^(approve|reject|retry|confirm):(\d+):(\d+)$/.exec(query.data ?? '');
     const row = match && store.get(Number(match[2]));
     if (!row || row.card_id !== query.message.message_id) return respond('Эта карточка больше не действует.');
@@ -136,20 +243,28 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     await refreshCard(row.id);
   }
 
-  async function sendPreview(row) {
-    let previewId = row.preview_id;
-    if (!previewId) {
-      const [method, params] = preview(adminId, store.parts(row.id));
-      const sent = await api(method, params);
-      previewId = (Array.isArray(sent) ? sent[0] : sent).message_id;
-      store.previewSent(row.id, previewId);
-    }
-    const message = await api('sendMessage', {
+  async function deliverPreview(id) {
+    const [method, params] = preview(adminId, store.parts(id));
+    const sent = await api(method, params);
+    return (Array.isArray(sent) ? sent[0] : sent).message_id;
+  }
+
+  function sendCard(row, previewId) {
+    return api('sendMessage', {
       chat_id: adminId,
       protect_content: true,
       reply_parameters: { message_id: previewId, allow_sending_without_reply: true },
-      ...card({ ...row, status: 'pending' }),
+      ...card(row),
     });
+  }
+
+  async function sendPreview(row) {
+    let previewId = row.preview_id;
+    if (!previewId) {
+      previewId = await deliverPreview(row.id);
+      store.previewSent(row.id, previewId);
+    }
+    const message = await sendCard({ ...row, status: 'pending' }, previewId);
     store.pending(row.id, message.message_id);
   }
 

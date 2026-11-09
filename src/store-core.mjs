@@ -62,6 +62,14 @@ export function createStore(db, transaction) {
     accept,
     get,
     finish,
+    statusCounts: () => Object.fromEntries(db.prepare(
+      'SELECT status, COUNT(*) AS total FROM submissions GROUP BY status',
+    ).all().map(({ status, total }) => [status, total])),
+    reviewQueue: (limit, offset) => db.prepare(`
+      SELECT id, status FROM submissions
+      WHERE status IN ('pending', 'failed', 'uncertain')
+      ORDER BY id DESC LIMIT ? OFFSET ?
+    `).all(limit, offset),
     parts: id => db.prepare('SELECT content FROM parts WHERE submission_id = ? ORDER BY message_id')
       .all(id).map(({ content }) => JSON.parse(content)),
     next: () => db.prepare(`
@@ -71,6 +79,9 @@ export function createStore(db, transaction) {
     pending: (id, cardId) => db.prepare(`
       UPDATE submissions SET status = 'pending', card_id = ? WHERE id = ?
     `).run(cardId, id),
+    replaceCard: (id, cardId, previewId) => db.prepare(`
+      UPDATE submissions SET card_id = ?, preview_id = ? WHERE id = ?
+    `).run(cardId, previewId, id),
     defer: (id, due) => db.prepare('UPDATE submissions SET due = ? WHERE id = ?').run(due, id),
     approve: (id, plan, now) => db.prepare(`
       UPDATE submissions SET status = 'approved', plan = ?, due = ?, version = version + 1 WHERE id = ?

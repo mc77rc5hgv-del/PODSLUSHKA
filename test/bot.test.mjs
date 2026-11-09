@@ -37,12 +37,17 @@ function fixture(t, path = ':memory:') {
   let nextMessageId = 0;
   let clock = 10_000;
   let fail;
+  let membership = { status: 'member' };
   let store;
   let bot;
   const api = async (method, params) => {
     calls.push({ method, params });
     if (method === 'getChat') return { type: 'channel', id: channelId, username: 'podslushka_example' };
-    if (method === 'getChatMember') return { status: 'administrator', can_post_messages: true };
+    if (method === 'getChatMember') {
+      if (params.user_id === identity.id) return { status: 'administrator', can_post_messages: true };
+      if (membership instanceof Error) throw membership;
+      return membership;
+    }
     if (fail?.method === method && params.chat_id === channelId) {
       const error = fail;
       fail = undefined;
@@ -65,6 +70,7 @@ function fixture(t, path = ':memory:') {
     get store() { return store; },
     get bot() { return bot; },
     advance: () => { clock += 2000; },
+    setMembership: member => { membership = member; },
     failOnce: (method, code) => { fail = { method, code }; },
     channelPosts: () => calls.filter(call => call.method.startsWith('send') && call.params.chat_id === channelId),
   };
@@ -104,12 +110,74 @@ test('private intake, exact admin authorization and one anonymous publication', 
   assert.equal(f.store.get(1).status, 'published');
   assert.equal(f.channelPosts().length, 1);
   const { params } = f.channelPosts()[0];
-  assert.equal(params.text, `${text}\n\nПодслушка в мида · Предложить пост`);
+  assert.equal(params.text, `${text}\n\nПОДСЛУШКА ВМЕДА · Предложить пост`);
   assert.deepEqual(params.entities[0], bold);
   assert.equal(params.entities[1].offset, text.length + 2);
   assert.equal(params.entities[1].url, 'https://t.me/podslushka_example');
   assert.equal(params.entities[2].url, 'https://t.me/podslushka_example_bot');
   assert.doesNotMatch(JSON.stringify(params), /sender_example|original_sender|502030405060|forward_origin/);
+});
+
+test('only subscribers can submit and users can verify a new subscription', async t => {
+  const f = fixture(t);
+  await f.restart();
+  f.setMembership({ status: 'left' });
+  await f.bot.update(privateMessage(1, { text: 'Первая заявка' }));
+  const prompt = f.calls.at(-1).params;
+  assert.match(prompt.text, /Подпишитесь на канал/);
+  assert.equal(prompt.reply_markup.inline_keyboard[0][0].url, 'https://t.me/podslushka_example');
+  assert.equal(f.store.get(1), undefined);
+
+  f.setMembership({ status: 'member' });
+  await f.bot.update({ callback_query: {
+    id: 'subscription', from: { id: userId }, message: { message_id: 5, chat: { id: userId } },
+    data: prompt.reply_markup.inline_keyboard[1][0].callback_data,
+  } });
+  assert.equal(f.calls.at(-1).method, 'editMessageText');
+  assert.match(f.calls.at(-1).params.text, /Публикации в канале полностью анонимны/);
+  assert.doesNotMatch(f.calls.at(-1).params.text, /администратор|username|Telegram ID/i);
+  await f.bot.update(privateMessage(2, { text: 'Вторая заявка' }));
+  assert.equal(f.store.get(1).status, 'collecting');
+
+  f.setMembership({ status: 'left' });
+  await f.bot.update(privateMessage(3, { text: 'После отписки' }));
+  assert.equal(f.store.get(2), undefined);
+  f.setMembership(new TelegramError('getChatMember', 503));
+  await f.bot.update(privateMessage(4, { text: 'При недоступности Telegram' }));
+  assert.equal(f.store.get(2), undefined);
+  assert.match(f.calls.at(-1).params.text, /пока не подтвердил подписку/);
+});
+
+test('only the admin can open the queue and recover an actionable moderation card', async t => {
+  const f = fixture(t);
+  await f.restart();
+  await f.bot.update(privateMessage(1, { text: 'Материал для модерации' }));
+  await f.bot.work();
+  const previous = f.store.get(1);
+  await f.bot.update(privateMessage(2, { text: '/admin' }));
+  assert.equal(f.calls.at(-1).params.text, 'Панель доступна администратору.');
+  assert.equal(f.store.get(2), undefined);
+  const open = callback(previous, 'reject', userId);
+  open.callback_query.data = 'panel:open:1';
+  await f.bot.update(open);
+  assert.equal(f.calls.at(-1).params.text, 'Доступ закрыт.');
+  assert.equal(f.store.get(1).card_id, previous.card_id);
+
+  await f.bot.update({ message: {
+    chat: { id: adminId, type: 'private' }, from: { id: adminId }, text: '/admin',
+  } });
+  const panel = f.calls.at(-1).params;
+  assert.match(panel.text, /На рассмотрении · 1/);
+  open.callback_query.from.id = adminId;
+  open.callback_query.data = panel.reply_markup.inline_keyboard[0][0].callback_data;
+  await f.bot.update(open);
+  const reopened = f.store.get(1);
+  assert.notEqual(reopened.card_id, previous.card_id);
+  assert.equal(reopened.status, 'pending');
+  await f.bot.update(callback(previous, 'reject'));
+  assert.equal(f.store.get(1).status, 'pending');
+  await f.bot.update(callback(reopened, 'reject'));
+  assert.equal(f.store.get(1).status, 'rejected');
 });
 
 test('a sticker without an author username can be rejected', async t => {
