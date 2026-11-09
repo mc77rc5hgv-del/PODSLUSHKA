@@ -3,35 +3,19 @@ import { join } from 'node:path';
 import { loadEnvFile } from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createBot } from './bot.mjs';
+import { readBotConfig } from './config.mjs';
 import { openStore } from './store.mjs';
 import { telegram } from './telegram.mjs';
 
 function readConfig() {
   if (existsSync('.env')) loadEnvFile('.env');
   const value = key => process.env[key]?.trim() || undefined;
-  const token = value('BOT_TOKEN');
-  const admin = value('ADMIN_ID');
-  const channel = value('CHANNEL_ID');
-  const channelUrl = value('CHANNEL_URL');
   const volumePath = value('RAILWAY_VOLUME_MOUNT_PATH');
   if (value('RAILWAY_ENVIRONMENT_ID') && !volumePath) {
     throw new Error('Подключите постоянный диск Railway к сервису. Путь монтирования: /data.');
   }
-  if (!token || !/^\d+:[a-zA-Z0-9_-]+$/.test(token)) throw new Error('Укажите токен BotFather в BOT_TOKEN.');
-  if (admin && (!/^\d+$/.test(admin) || !Number.isSafeInteger(Number(admin)) || Number(admin) <= 0)) {
-    throw new Error('ADMIN_ID должен быть числовым Telegram ID. Его покажет команда /id.');
-  }
-  if (channel && !/^@[a-zA-Z0-9_]+$/.test(channel) && !/^-100\d+$/.test(channel)) {
-    throw new Error('CHANNEL_ID должен иметь вид @имя_канала (латиницей) или -100…');
-  }
-  if (channelUrl && !/^https:\/\/t\.me\/(?:\+|joinchat\/)?[a-zA-Z0-9_-]+$/.test(channelUrl)) {
-    throw new Error('CHANNEL_URL должен содержать ссылку на канал или ссылку-приглашение https://t.me/…');
-  }
   return {
-    token,
-    adminId: admin && Number(admin),
-    channelId: channel?.startsWith('@') ? channel : channel && Number(channel),
-    channelUrl,
+    ...readBotConfig(process.env),
     dbPath: volumePath ? join(volumePath, 'submissions.sqlite') : value('DB_PATH') ?? 'data/submissions.sqlite',
   };
 }

@@ -1,0 +1,11 @@
+{
+  "name": "podslushka-vma",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [{ "name": "QUEUE", "class_name": "ModerationQueue" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ModerationQueue"] }]
+}

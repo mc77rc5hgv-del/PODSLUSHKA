@@ -186,6 +186,7 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       if (update.message) await onMessage(update.message);
       if (update.callback_query) await onCallback(update.callback_query);
     },
+    isReady: () => Boolean(target),
     pollTimeout() {
       const row = target && store.next();
       return row ? Math.max(0, Math.min(20, Math.ceil((row.due - now()) / 1000))) : 20;

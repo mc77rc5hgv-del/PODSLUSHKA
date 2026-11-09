@@ -23,6 +23,15 @@ Telegram-бот принимает предложения в личном чат
 
 Локальная проверка сценариев с имитацией Telegram API запускается командой `node --test`.
 
+### Cloudflare Workers Free
+
+Worker принимает обновления Telegram по HTTPS, а очередь хранится в [SQLite Durable Object](https://developers.cloudflare.com/durable-objects/platform/pricing/). После каждого нового сообщения Worker планирует проверку очереди. В остальное время он ждёт новых запросов от Telegram.
+
+1. Войдите в Cloudflare с планом **Workers Free**. Из корня репозитория выполните `npx wrangler login` и `npx wrangler deploy`. Wrangler напечатает адрес на `workers.dev`.
+2. Через `npx wrangler secret put ИМЯ` задайте `BOT_TOKEN`, `ADMIN_ID`, `CHANNEL_ID` и `WEBHOOK_SECRET`. Для закрытого канала добавьте `CHANNEL_URL`. Для `WEBHOOK_SECRET` сгенерируйте случайное значение, например командой `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
+3. Вызовите [Telegram Bot API setWebhook](https://core.telegram.org/bots/api#setwebhook). В параметре `url` укажите адрес Worker с окончанием `/telegram`, в `secret_token` передайте значение `WEBHOOK_SECRET`, в `allowed_updates` передайте `["message", "callback_query"]`. Для сохранения порядка обновлений передайте `max_connections: 1`.
+4. Отправьте боту `/check` и проверьте публикацию тестовой заявки после одобрения. При переключении обратно на локальный опрос сначала удалите webhook через `deleteWebhook`.
+
 ### Northflank Sandbox
 
 [Northflank Sandbox](https://northflank.com/pricing) включает ресурсы для постоянно работающего контейнера и постоянного диска в пределах бесплатного лимита.
