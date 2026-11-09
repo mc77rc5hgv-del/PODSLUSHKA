@@ -23,6 +23,15 @@ Telegram-бот принимает предложения в личном чат
 
 Локальная проверка сценариев с имитацией Telegram API запускается командой `node --test`.
 
+### Northflank Sandbox
+
+[Northflank Sandbox](https://northflank.com/pricing) включает ресурсы для постоянно работающего контейнера и постоянного диска в пределах бесплатного лимита.
+
+1. В [Northflank](https://app.northflank.com/) создайте проект в рабочем пространстве **Sandbox**. Добавьте **Combined service** из этого GitHub-репозитория, ветка `main`. Выберите сборку **Dockerfile**.
+2. В разделе **Advanced** подключите [постоянный диск](https://northflank.com/docs/v1/application/databases-and-persistence/add-a-volume) по пути `/data` с режимом **Single Read/Write**. Оставьте одну реплику и уберите порты из настроек сервиса.
+3. В **Runtime environment variables** задайте `DB_PATH=/data/submissions.sqlite`, `BOT_TOKEN`, `ADMIN_ID`, `CHANNEL_ID` и при необходимости `CHANNEL_URL`. Токен вводите в панели сервиса. Если вы ещё не знаете свой `ADMIN_ID`, запустите сервис с токеном и отправьте `/id` боту, затем внесите полученное число.
+4. Дождитесь запуска контейнера. Отправьте `/check` в личку боту и проверьте публикацию тестовой заявки после одобрения.
+
 ### Railway Free
 
 План [Railway Free](https://docs.railway.com/pricing/plans) даёт $1 ресурсов в месяц. Бот использует один контейнер и небольшой диск. Расход отображается в **Workspace → Usage**. Публикация работает, пока сервис запущен и у рабочего пространства есть доступные ресурсы.
