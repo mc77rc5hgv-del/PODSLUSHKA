@@ -76,9 +76,15 @@ export function preview(chatId, parts) {
   return parts.length === 1 ? messageStep(chatId, parts[0], extra) : albumStep(chatId, parts, extra);
 }
 
-function withFooter(part, links) {
+function withFooter(part, links, username) {
   let text = part.text ? `${part.text}\n\n` : '';
   const entities = [...part.entities];
+  if (username) {
+    text += '✍️ Автор: ';
+    const label = `@${username}`;
+    entities.push({ type: 'text_link', offset: text.length, length: label.length, url: `https://t.me/${username}` });
+    text += label + '\n';
+  }
   for (const [index, { text: label, url }] of links.entries()) {
     if (index > 0) text += ' · ';
     // Telegram measures entity offsets in UTF-16 code units, like JS string.length.
@@ -88,26 +94,27 @@ function withFooter(part, links) {
   return { ...part, text, entities };
 }
 
-export function publication(chatId, parts, links) {
+export function publication(chatId, parts, links, username) {
+  const separateFooter = () => messageStep(chatId, withFooter({ type: 'text', text: '', entities: [] }, links, username));
   if (parts.length > 1) {
     // A single album caption appears beneath the album in Telegram.
     const captionIndex = parts.findIndex(part => part.text);
     const index = captionIndex === -1 ? 0 : captionIndex;
-    const caption = withFooter(parts[index], links);
+    const caption = withFooter(parts[index], links, username);
     if ([...caption.text].length <= 1024) {
       const album = parts.with(index, caption);
       return [albumStep(chatId, album)];
     }
 
-    const footer = withFooter({ type: 'text', text: '', entities: [] }, links);
-    return [albumStep(chatId, parts), messageStep(chatId, footer)];
+    return [albumStep(chatId, parts), separateFooter()];
   }
 
   const [part] = parts;
-  const footer = withFooter(part, links);
+  const footer = withFooter(part, links, username);
   const limit = part.type === 'text' ? 4096 : 1024;
   if (part.type !== 'sticker' && part.type !== 'video_note' && [...footer.text].length <= limit) {
     return [messageStep(chatId, footer)];
   }
+  if (username) return [messageStep(chatId, part), separateFooter()];
   return [messageStep(chatId, part, { reply_markup: { inline_keyboard: [links] } })];
 }

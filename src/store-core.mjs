@@ -25,7 +25,13 @@ export function createStore(db, transaction) {
     CREATE INDEX IF NOT EXISTS submissions_album ON submissions (chat_id, album, status);
   `);
 
-  function accept(message, content, now) {
+  transaction(() => {
+    if (!db.prepare('PRAGMA table_info(submissions)').all().some(({ name }) => name === 'public_username')) {
+      db.exec('ALTER TABLE submissions ADD COLUMN public_username TEXT');
+    }
+  });
+
+  function accept(message, content, now, username) {
     const chatId = message.from.id;
     const messageId = message.message_id;
     const album = message.media_group_id ?? null;
@@ -35,15 +41,17 @@ export function createStore(db, transaction) {
         return null;
       }
       const existing = album && db.prepare(`
-        SELECT id FROM submissions WHERE chat_id = ? AND album = ?
-          AND status = 'collecting' AND preview_id IS NULL
+        SELECT id, status FROM submissions WHERE chat_id = ? AND album = ?
+          AND (status IN ('draft', 'awaiting_signature') OR (status = 'collecting' AND preview_id IS NULL))
       `).get(chatId, album);
       const id = existing?.id ?? db.prepare(`
-        INSERT INTO submissions (chat_id, username, album, due) VALUES (?, ?, ?, ?) RETURNING id
-      `).get(chatId, message.from.username ?? null, album, due).id;
+        INSERT INTO submissions (chat_id, username, album, due, status)
+        VALUES (?, ?, ?, ?, 'draft') RETURNING id
+      `).get(chatId, username, album, due).id;
       db.prepare('INSERT INTO parts VALUES (?, ?, ?, ?)').run(chatId, messageId, id, JSON.stringify(content));
-      if (existing) db.prepare('UPDATE submissions SET due = ? WHERE id = ?').run(due, id);
-      return { id, first: !existing };
+      if (existing && existing.status !== 'awaiting_signature') {
+        db.prepare('UPDATE submissions SET due = ? WHERE id = ?').run(due, id);
+      }
     });
   }
 
@@ -72,9 +80,22 @@ export function createStore(db, transaction) {
     `).all(...statuses, limit, offset),
     parts: id => db.prepare('SELECT content FROM parts WHERE submission_id = ? ORDER BY message_id')
       .all(id).map(({ content }) => JSON.parse(content)),
+    firstMessageId: id => db.prepare(
+      'SELECT message_id FROM parts WHERE submission_id = ? ORDER BY message_id LIMIT 1',
+    ).get(id).message_id,
     next: () => db.prepare(`
-      SELECT * FROM submissions WHERE status IN ('collecting', 'approved') ORDER BY due, id LIMIT 1
+      SELECT * FROM submissions WHERE status IN ('draft', 'awaiting_signature', 'collecting', 'approved')
+      ORDER BY due, id LIMIT 1
     `).get(),
+    awaitSignature: (id, due) => db.prepare(`
+      UPDATE submissions SET status = 'awaiting_signature', due = ? WHERE id = ?
+    `).run(due, id),
+    chooseSignature: (id, username, due) => db.prepare(`
+      UPDATE submissions SET status = 'collecting', public_username = ?, due = ? WHERE id = ?
+    `).run(username, due, id),
+    updateDraftUsername: (id, username) => db.prepare(`
+      UPDATE submissions SET username = ?, version = version + 1 WHERE id = ?
+    `).run(username, id),
     previewSent: (id, previewId) => db.prepare('UPDATE submissions SET preview_id = ? WHERE id = ?').run(previewId, id),
     pending: (id, cardId) => db.prepare(`
       UPDATE submissions SET status = 'pending', card_id = ? WHERE id = ?

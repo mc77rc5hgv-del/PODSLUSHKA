@@ -1,9 +1,10 @@
 import { adminButton, adminPanel, isReviewable } from './admin.mjs';
 import { preview, publication, readContent } from './content.mjs';
-import { channelButton, channelName, publicKeyboard, publicScreen } from './public-menu.mjs';
+import { channelButton, channelName, publicKeyboard, publicScreen, signaturePrompt } from './public-menu.mjs';
 import { TelegramError } from './telegram.mjs';
 
 const setupNotice = 'Бот ещё настраивается. Приём сообщений откроется после настройки.';
+const draftLifetime = 24 * 60 * 60 * 1000;
 
 const statusText = {
   pending: '🕒 Ожидает решения. Выберите действие ниже.',
@@ -27,21 +28,27 @@ function card(row) {
   }));
   let status = statusText[row.status];
   if (row.status === 'uncertain') {
-    status += row.step === 0 ? ' Шаг: материал заявки.' : ' Шаг: сообщение со ссылками под альбомом.';
+    status += row.step === 0 ? ' Шаг: материал заявки.' : ' Шаг: сообщение с подписью или ссылками.';
   }
   const author = row.username
     ? `@${row.username.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}`
     : 'без @username';
   const actions = row.status === 'uncertain' ? keyboard.map(button => [button]) : keyboard.length ? [keyboard] : [];
+  const signature = row.public_username ? `@${row.public_username}` : 'анонимно';
   return {
-    text: `📨 <b>Заявка №${row.id}</b>\n👤 Автор: ${author}\n🆔 Telegram ID: <code>${row.chat_id}</code>\n\n${status}`,
+    text: `📨 <b>Заявка №${row.id}</b>\n👤 Автор: ${author}\n🆔 Telegram ID: <code>${row.chat_id}</code>\n📣 В канале: ${signature}\n\n${status}`,
     parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
     reply_markup: { inline_keyboard: [...actions, [adminButton]] },
   };
 }
 
 function retryAt(error, now) {
   return now + 1000 * (error.retryAfter ?? 15);
+}
+
+function usernameOf(user) {
+  return /^[a-zA-Z0-9_]{1,32}$/.test(user.username ?? '') ? user.username : null;
 }
 
 export function createBot({ api, store, config, identity, now = Date.now, log = console.warn }) {
@@ -144,15 +151,7 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       }
       return;
     }
-    const accepted = store.accept(message, content, now());
-    if (accepted?.first) {
-      await attempt('sendMessage', {
-        chat_id: id,
-        text: `✅ <b>Заявка №${accepted.id} принята</b>\n\n🕒 Она отправлена на модерацию. Пост появится в канале после одобрения.`,
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: [[channelButton(target.links[0].url)]] },
-      });
-    }
+    store.accept(message, content, now(), usernameOf(message.from));
   }
 
   async function refreshCard(id) {
@@ -160,8 +159,48 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     await attempt('editMessageText', { chat_id: adminId, message_id: row.card_id, ...card(row) });
   }
 
+  async function onSignature(query, match, respond) {
+    const [, action, id, version] = match;
+    const sender = query.from.id;
+    const row = store.get(Number(id));
+    if (row?.chat_id !== sender || query.message?.chat?.id !== sender) return respond('Черновик недоступен.');
+    if (row.status !== 'awaiting_signature' || row.due <= now()) return respond('Выбор уже закрыт.');
+    const edit = params => attempt('editMessageText', { chat_id: sender, message_id: query.message.message_id, ...params });
+    if (row.version !== Number(version)) {
+      await respond('Проверьте обновлённую подпись и выберите снова.');
+      return edit(signaturePrompt(row));
+    }
+    if (action === 'cancel') {
+      store.finish(row.id, 'cancelled');
+      await respond('Черновик отменён.');
+      return edit({ text: `Черновик №${row.id} отменён. Чтобы начать заново, пришлите материал.`, reply_markup: { inline_keyboard: [] } });
+    }
+    if (!target) return respond(setupNotice);
+    const username = action === 'signed' ? usernameOf(query.from) : null;
+    if (action === 'signed' && username !== row.username) {
+      store.updateDraftUsername(row.id, username);
+      await respond('Ваш @username изменился. Проверьте подпись и выберите снова.');
+      return edit(signaturePrompt(store.get(row.id)));
+    }
+    if (action === 'signed' && !username) return respond('Укажите @username в Telegram или выберите «Анонимно».');
+    const subscribed = await membership(sender);
+    if (subscribed !== true) {
+      return respond(subscribed === false ? 'Подпишитесь на канал и повторите выбор.' : 'Проверка подписки недоступна. Попробуйте ещё раз.');
+    }
+    store.chooseSignature(row.id, username, now());
+    await respond('Заявка отправлена на модерацию.');
+    return edit({
+      text: `✅ <b>Заявка №${row.id} принята</b>\n\n📣 В канале: ${username ? `@${username}` : 'анонимно'}.\n🕒 Пост появится после одобрения.`,
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      reply_markup: { inline_keyboard: [[channelButton(target.links[0].url)]] },
+    });
+  }
+
   async function onCallback(query) {
     const respond = text => attempt('answerCallbackQuery', { callback_query_id: query.id, text });
+    const signature = /^draft:(anonymous|signed|cancel):(\d{1,15}):(\d{1,15})$/.exec(query.data ?? '');
+    if (signature) return onSignature(query, signature, respond);
     if (['subscribe:check', 'public:home', 'public:help'].includes(query.data)) {
       if (query.message?.chat?.id !== query.from.id) return respond('Откройте личный чат с ботом.');
       if (!target) return respond(setupNotice);
@@ -227,7 +266,7 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       } else if (!target) {
         return respond('Сначала проверьте подключение канала через /check.');
       } else if (action === 'approve' && row.status === 'pending') {
-        store.approve(row.id, publication(target.chatId, store.parts(row.id), target.links), now());
+        store.approve(row.id, publication(target.chatId, store.parts(row.id), target.links, row.public_username), now());
         result = 'Заявка отправлена на публикацию.';
       } else if (action === 'retry' && ['failed', 'uncertain'].includes(row.status)) {
         store.resume(row.id, now());
@@ -308,11 +347,22 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       const row = target && store.next();
       if (!row || row.due > now()) return;
       if (row.status === 'approved') return publish(row);
+      if (row.status === 'awaiting_signature') return store.finish(row.id, 'cancelled');
       try {
-        await sendPreview(row);
+        if (row.status === 'draft') {
+          await api('sendMessage', {
+            chat_id: row.chat_id,
+            reply_parameters: { message_id: store.firstMessageId(row.id), allow_sending_without_reply: true },
+            ...signaturePrompt(row),
+          });
+          store.awaitSignature(row.id, now() + draftLifetime);
+        } else {
+          await sendPreview(row);
+        }
       } catch (error) {
         if (!(error instanceof TelegramError)) throw error;
         log(error.message);
+        if (row.status === 'draft' && error.code === 403) return store.finish(row.id, 'cancelled');
         store.defer(row.id, retryAt(error, now()));
       }
     },

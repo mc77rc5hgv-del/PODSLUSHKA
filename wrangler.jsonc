@@ -1,5 +1,5 @@
 {
-  "name": "podslushka-vma",
+  "name": "podslushka-vmeda",
   "main": "src/worker.mjs",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
