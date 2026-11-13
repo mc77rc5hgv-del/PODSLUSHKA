@@ -1,4 +1,4 @@
-import { adminButton, adminPanel, isReviewable } from './admin.mjs';
+import { adminButton, adminPanel, isReviewable, moderatorButton } from './admin.mjs';
 import { preview, publication, readContent } from './content.mjs';
 import { channelButton, channelName, publicKeyboard, publicScreen, signaturePrompt } from './public-menu.mjs';
 import { TelegramError } from './telegram.mjs';
@@ -15,7 +15,7 @@ const statusText = {
   uncertain: '🔎 Telegram мог принять отправку. Проверьте этот шаг в канале перед выбором.',
 };
 
-function card(row) {
+function card(row, isOwner) {
   const buttons = {
     pending: [['✅ Опубликовать', 'approve', 'success'], ['❌ Отклонить', 'reject', 'danger']],
     failed: [['🔄 Повторить отправку', 'retry', 'primary']],
@@ -35,11 +35,12 @@ function card(row) {
     : 'без @username';
   const actions = row.status === 'uncertain' ? keyboard.map(button => [button]) : keyboard.length ? [keyboard] : [];
   const signature = row.public_username ? `@${row.public_username}` : 'анонимно';
+  const sender = isOwner ? `\n👤 Автор: ${author}\n🆔 Telegram ID: <code>${row.chat_id}</code>` : '';
   return {
-    text: `📨 <b>Заявка №${row.id}</b>\n👤 Автор: ${author}\n🆔 Telegram ID: <code>${row.chat_id}</code>\n📣 В канале: ${signature}\n\n${status}`,
+    text: `📨 <b>Заявка №${row.id}</b>${sender}\n📣 В канале: ${signature}\n\n${status}`,
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
-    reply_markup: { inline_keyboard: [...actions, [adminButton]] },
+    reply_markup: { inline_keyboard: [...actions, [isOwner ? adminButton : moderatorButton]] },
   };
 }
 
@@ -54,7 +55,9 @@ function usernameOf(user) {
 export function createBot({ api, store, config, identity, now = Date.now, log = console.warn }) {
   let target;
   let lastAlbum;
-  const { adminId, channelId, channelUrl } = config;
+  const { adminId, moderatorId, channelId, channelUrl } = config;
+  const moderatorChats = [...new Set([adminId, moderatorId].filter(Boolean))];
+  const canModerate = id => moderatorChats.includes(id);
   async function attempt(method, params) {
     try {
       await api(method, params);
@@ -64,10 +67,10 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
   }
 
   const say = (chatId, text) => attempt('sendMessage', { chat_id: chatId, text });
-  const showAdmin = () => attempt('sendMessage', {
-    chat_id: adminId,
+  const showAdmin = id => attempt('sendMessage', {
+    chat_id: id,
     protect_content: true,
-    ...adminPanel(store, 0),
+    ...adminPanel(store, 0, 'all', id === adminId),
   });
 
   async function membership(userId) {
@@ -81,7 +84,7 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
   }
 
   function publicOptions(userId, subscribed) {
-    return { url: target.links[0].url, subscribed, isAdmin: userId === adminId };
+    return { url: target.links[0].url, subscribed, isAdmin: userId === adminId, isModerator: userId === moderatorId };
   }
 
   function subscriptionPrompt(subscribed) {
@@ -125,8 +128,8 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     const id = message.from.id;
     const command = message.text?.split(/\s+/, 1)[0];
     if (command === '/id') return say(id, `Ваш Telegram ID: ${id}`);
-    if (command === '/check' && id === adminId) return say(id, await check());
-    if (command === '/admin') return id === adminId ? showAdmin() : say(id, 'Панель доступна администратору.');
+    if (command === '/check') return say(id, id === adminId ? await check() : 'Доступ закрыт.');
+    if (command === '/admin') return canModerate(id) ? showAdmin(id) : say(id, 'Панель доступна администратору.');
     if (command === '/start' || command === '/help') {
       if (!target) return say(id, setupNotice);
       const screen = command === '/help' ? 'help' : 'home';
@@ -156,7 +159,16 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
 
   async function refreshCard(id) {
     const row = store.get(id);
-    await attempt('editMessageText', { chat_id: adminId, message_id: row.card_id, ...card(row) });
+    for (const chatId of moderatorChats) {
+      const messageId = cardIdFor(row, chatId);
+      if (messageId) {
+        await attempt('editMessageText', { chat_id: chatId, message_id: messageId, ...card(row, chatId === adminId) });
+      }
+    }
+  }
+
+  function cardIdFor(row, chatId) {
+    return chatId === adminId ? row.card_id : store.moderatorCard(row.id, chatId);
   }
 
   async function onSignature(query, match, respond) {
@@ -218,10 +230,12 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       });
       return;
     }
-    if (query.from.id !== adminId || query.message?.chat?.id !== adminId) return respond('Доступ закрыт.');
+    const reviewer = query.from.id;
+    if (!canModerate(reviewer) || query.message?.chat?.id !== reviewer) return respond('Доступ закрыт.');
+    const isOwner = reviewer === adminId;
     if (query.data === 'panel:home') {
       await respond();
-      return showAdmin();
+      return showAdmin(reviewer);
     }
     const panelAction = /^panel:(page|open):(\d{1,15})(?::(all|pending|attention))?$/.exec(query.data ?? '');
     if (panelAction) {
@@ -229,33 +243,37 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
       if (action === 'page') {
         await respond('Панель обновлена.');
         return attempt('editMessageText', {
-          chat_id: adminId,
+          chat_id: reviewer,
           message_id: query.message.message_id,
-          ...adminPanel(store, Number(value), filter),
+          ...adminPanel(store, Number(value), isOwner ? filter : 'all', isOwner),
         });
       }
       const row = store.get(Number(value));
       if (!row || !isReviewable(row.status)) return respond('Заявка уже обработана. Обновите панель.');
       await respond(`Открываю заявку №${row.id}.`);
       try {
-        const previewId = await deliverPreview(row.id);
-        const message = await sendCard(row, previewId);
-        store.replaceCard(row.id, message.message_id, previewId);
-        await attempt('editMessageReplyMarkup', {
-          chat_id: adminId,
-          message_id: row.card_id,
-          reply_markup: { inline_keyboard: [[adminButton]] },
-        });
+        const previousCard = cardIdFor(row, reviewer);
+        const previewId = await deliverPreview(row.id, reviewer);
+        const message = await sendCard(row, previewId, reviewer);
+        if (isOwner) store.replaceCard(row.id, message.message_id, previewId);
+        else store.saveModeratorCard(row.id, reviewer, message.message_id);
+        if (previousCard) {
+          await attempt('editMessageReplyMarkup', {
+            chat_id: reviewer,
+            message_id: previousCard,
+            reply_markup: { inline_keyboard: [[isOwner ? adminButton : moderatorButton]] },
+          });
+        }
       } catch (error) {
         if (!(error instanceof TelegramError)) throw error;
         log(error.message);
-        await say(adminId, 'Не удалось открыть заявку. Попробуйте ещё раз.');
+        await say(reviewer, 'Не удалось открыть заявку. Попробуйте ещё раз.');
       }
       return;
     }
     const match = /^(approve|reject|retry|confirm):(\d+):(\d+)$/.exec(query.data ?? '');
     const row = match && store.get(Number(match[2]));
-    if (!row || row.card_id !== query.message.message_id) return respond('Эта карточка больше не действует.');
+    if (!row || cardIdFor(row, reviewer) !== query.message.message_id) return respond('Эта карточка больше не действует.');
 
     const action = match[1];
     let result = 'Решение уже изменилось.';
@@ -280,18 +298,18 @@ export function createBot({ api, store, config, identity, now = Date.now, log = 
     await refreshCard(row.id);
   }
 
-  async function deliverPreview(id) {
-    const [method, params] = preview(adminId, store.parts(id));
+  async function deliverPreview(id, chatId = adminId) {
+    const [method, params] = preview(chatId, store.parts(id));
     const sent = await api(method, params);
     return (Array.isArray(sent) ? sent[0] : sent).message_id;
   }
 
-  function sendCard(row, previewId) {
+  function sendCard(row, previewId, chatId = adminId) {
     return api('sendMessage', {
-      chat_id: adminId,
+      chat_id: chatId,
       protect_content: true,
       reply_parameters: { message_id: previewId, allow_sending_without_reply: true },
-      ...card(row),
+      ...card(row, chatId === adminId),
     });
   }
 

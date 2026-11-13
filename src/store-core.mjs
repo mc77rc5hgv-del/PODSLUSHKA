@@ -23,6 +23,12 @@ export function createStore(db, transaction) {
     CREATE INDEX IF NOT EXISTS parts_submission ON parts (submission_id, message_id);
     CREATE INDEX IF NOT EXISTS submissions_due ON submissions (status, due);
     CREATE INDEX IF NOT EXISTS submissions_album ON submissions (chat_id, album, status);
+    CREATE TABLE IF NOT EXISTS moderator_cards (
+      submission_id INTEGER NOT NULL REFERENCES submissions(id),
+      chat_id INTEGER NOT NULL,
+      message_id INTEGER NOT NULL,
+      PRIMARY KEY (submission_id, chat_id)
+    );
   `);
 
   transaction(() => {
@@ -103,6 +109,13 @@ export function createStore(db, transaction) {
     replaceCard: (id, cardId, previewId) => db.prepare(`
       UPDATE submissions SET card_id = ?, preview_id = ? WHERE id = ?
     `).run(cardId, previewId, id),
+    moderatorCard: (id, chatId) => db.prepare(
+      'SELECT message_id FROM moderator_cards WHERE submission_id = ? AND chat_id = ?',
+    ).get(id, chatId)?.message_id,
+    saveModeratorCard: (id, chatId, messageId) => db.prepare(`
+      INSERT INTO moderator_cards VALUES (?, ?, ?)
+      ON CONFLICT(submission_id, chat_id) DO UPDATE SET message_id = excluded.message_id
+    `).run(id, chatId, messageId),
     defer: (id, due) => db.prepare('UPDATE submissions SET due = ? WHERE id = ?').run(due, id),
     approve: (id, plan, now) => db.prepare(`
       UPDATE submissions SET status = 'approved', plan = ?, due = ?, version = version + 1 WHERE id = ?

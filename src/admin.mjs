@@ -11,12 +11,13 @@ const filters = {
 const pageSize = 6;
 
 export const adminButton = { text: '🛠 Панель модерации', callback_data: 'panel:home', style: 'primary' };
+export const moderatorButton = { ...adminButton, text: '📋 Обработка заявок' };
 
 export function isReviewable(status) {
   return Object.hasOwn(reviewLabels, status);
 }
 
-export function adminPanel(store, requestedPage, filter = 'all') {
+export function adminPanel(store, requestedPage, filter = 'all', isOwner = true) {
   const counts = store.statusCounts();
   const count = status => counts[status] ?? 0;
   const { text: selected, statuses } = filters[filter];
@@ -24,11 +25,11 @@ export function adminPanel(store, requestedPage, filter = 'all') {
   const pages = Math.max(1, Math.ceil(waiting / pageSize));
   const page = Math.min(requestedPage, pages - 1);
   const queue = store.reviewQueue(pageSize, page * pageSize, statuses);
-  const keyboard = [Object.entries(filters).map(([key, { text }]) => ({
+  const keyboard = isOwner ? [Object.entries(filters).map(([key, { text }]) => ({
     text,
     callback_data: `panel:page:0:${key}`,
     ...(key === filter ? { style: 'primary' } : {}),
-  }))];
+  }))] : [];
   keyboard.push(...queue.map(({ id, status }) => [{
     text: `№${id} · ${reviewLabels[status]}`,
     callback_data: `panel:open:${id}`,
@@ -41,15 +42,17 @@ export function adminPanel(store, requestedPage, filter = 'all') {
 
   return {
     text: [
-      '🛠 <b>Панель модерации</b>',
+      isOwner ? '🛠 <b>Панель модерации</b>' : '📋 <b>Обработка заявок</b>',
       '',
-      `🕒 На рассмотрении · ${count('pending')}`,
-      `📤 Готовятся или отправляются · ${count('collecting') + count('approved') + count('sending')}`,
-      `⚠️ Требуют внимания · ${count('failed') + count('uncertain')}`,
-      `✅ Опубликовано · ${count('published')}`,
-      `❌ Отклонено · ${count('rejected')}`,
-      '',
-      `<b>Заявки · ${selected}</b>`,
+      ...(isOwner ? [
+        `🕒 На рассмотрении · ${count('pending')}`,
+        `📤 Готовятся или отправляются · ${count('collecting') + count('approved') + count('sending')}`,
+        `⚠️ Требуют внимания · ${count('failed') + count('uncertain')}`,
+        `✅ Опубликовано · ${count('published')}`,
+        `❌ Отклонено · ${count('rejected')}`,
+        '',
+        `<b>Заявки · ${selected}</b>`,
+      ] : []),
       waiting ? `Нажмите на номер, чтобы открыть материал. Страница ${page + 1} из ${pages}.` : 'В этой категории пока нет заявок.',
     ].join('\n'),
     parse_mode: 'HTML',

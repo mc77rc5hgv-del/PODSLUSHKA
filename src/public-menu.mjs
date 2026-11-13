@@ -1,4 +1,4 @@
-import { adminButton } from './admin.mjs';
+import { adminButton, moderatorButton } from './admin.mjs';
 
 export const channelName = 'ПОДСЛУШКА ВМЕДА';
 
@@ -15,7 +15,7 @@ export const botDescription = `💬 ${channelName}
 const guideButton = { text: '📖 Что можно отправить', callback_data: 'public:help' };
 export const channelButton = url => ({ text: '📣 Открыть канал', url, style: 'primary' });
 
-export function publicKeyboard({ url, subscribed, isAdmin, screen = 'home' }) {
+export function publicKeyboard({ url, subscribed, isAdmin, isModerator, screen = 'home' }) {
   const buttons = [[channelButton(url)]];
   if (subscribed !== true) {
     buttons.push([{ text: '✅ Проверить подписку', callback_data: 'subscribe:check', style: 'success' }]);
@@ -24,6 +24,7 @@ export function publicKeyboard({ url, subscribed, isAdmin, screen = 'home' }) {
     ? { text: '🏠 Главное меню', callback_data: 'public:home' }
     : guideButton]);
   if (isAdmin) buttons.push([adminButton]);
+  else if (isModerator) buttons.push([moderatorButton]);
   return { inline_keyboard: buttons };
 }
 

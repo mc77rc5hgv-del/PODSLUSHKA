@@ -10,6 +10,7 @@ import { openStore } from '../src/store.mjs';
 import { TelegramError } from '../src/telegram.mjs';
 
 const adminId = 10;
+const moderatorId = 11;
 const channelId = -1001234567890;
 const userId = 502030405060;
 const identity = { id: 99, username: 'podslushka_example_bot' };
@@ -55,7 +56,7 @@ async function submitDraft(f, action = 'anonymous') {
   await f.bot.work();
 }
 
-function fixture(t, path = ':memory:') {
+function fixture(t, path = ':memory:', botConfig = config) {
   const calls = [];
   let nextMessageId = 0;
   let clock = 10_000;
@@ -82,7 +83,7 @@ function fixture(t, path = ':memory:') {
   const restart = async () => {
     store?.close();
     store = openStore(path);
-    bot = createBot({ api, store, config, identity, now: () => clock, log: () => {} });
+    bot = createBot({ api, store, config: botConfig, identity, now: () => clock, log: () => {} });
     assert.match(await bot.check(), /Канал подключён/);
     await bot.recover();
   };
@@ -218,6 +219,51 @@ test('only the admin can open the queue and recover an actionable moderation car
   assert.equal(f.store.get(1).status, 'pending');
   await f.bot.update(callback(reopened, 'reject'));
   assert.equal(f.store.get(1).status, 'rejected');
+});
+
+test('the moderator can decide submissions without access to owner tools or anonymous author details', async t => {
+  const f = fixture(t, ':memory:', { ...config, moderatorId });
+  await f.restart();
+  await f.bot.update(privateMessage(1, { text: 'Материал' }));
+  await submitDraft(f);
+  const ownerCard = f.store.get(1);
+  assert.match(f.calls.at(-1).params.text, /@sender_example/);
+
+  const command = text => f.bot.update({ message: {
+    chat: { id: moderatorId, type: 'private' }, from: { id: moderatorId }, text,
+  } });
+  await command('/admin');
+  const panel = f.calls.at(-1).params;
+  assert.match(panel.text, /Обработка заявок/);
+  assert.doesNotMatch(panel.text, /На рассмотрении ·|Опубликовано ·|Отклонено ·/);
+  assert.ok(panel.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'panel:open:1'));
+  await command('/check');
+  assert.equal(f.calls.at(-1).params.text, 'Доступ закрыт.');
+
+  const fromModerator = (data, messageId) => ({ callback_query: {
+    id: 'moderator', from: { id: moderatorId }, message: { message_id: messageId, chat: { id: moderatorId } }, data,
+  } });
+  await f.bot.update(fromModerator('panel:page:0:attention', 100));
+  assert.doesNotMatch(f.calls.at(-1).params.text, /Опубликовано ·|Требуют внимания ·/);
+  await f.bot.update(fromModerator('approve:1:0', ownerCard.card_id));
+  assert.equal(f.store.get(1).status, 'pending');
+
+  await f.bot.update(fromModerator('panel:open:1', 100));
+  const moderatorCard = f.store.moderatorCard(1, moderatorId);
+  assert.ok(moderatorCard);
+  assert.equal(f.store.get(1).card_id, ownerCard.card_id);
+  const card = f.calls.at(-1).params;
+  assert.match(card.text, /В канале: анонимно/);
+  assert.doesNotMatch(card.text, /sender_example|502030405060/);
+  await f.bot.update(fromModerator('approve:1:0', moderatorCard));
+  await f.bot.update(callback(ownerCard, 'reject'));
+  await f.bot.work();
+  assert.equal(f.store.get(1).status, 'published');
+  assert.equal(f.channelPosts().length, 1);
+  for (const chatId of [adminId, moderatorId]) {
+    assert.ok(f.calls.some(call => call.method === 'editMessageText'
+      && call.params.chat_id === chatId && call.params.text.includes('Опубликовано')));
+  }
 });
 
 test('a sticker without an author username can be rejected', async t => {
